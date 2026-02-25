@@ -1,0 +1,14 @@
+{
+    "base": {
+        "content": "<!DOCTYPE html>\n<html>\n<head>\n<style>\n  body { font-family: sans-serif; }\n  .container { padding: 20px; }\n  .footer { font-size: 12px; color: #888; margin-top: 20px; }\n</style>\n</head>\n<body>\n  <div class=\"container\">\n    <p>Bonjour {variable},</p>\n    \n    <p>Ceci est un mail de test envoy\u00e9 automatiquement via notre application Python.</p>\n    \n    <p>Nous esp\u00e9rons que vous allez bien.</p>\n    \n    <p>Cordialement,<br>\n    Votre \u00e9quipe</p>\n  </div>\n  \n  <div class=\"footer\">\n    <p>Envoy\u00e9 automatiquement.</p>\n  </div>\n</body>\n</html>",
+        "variables": [
+            "variable"
+        ]
+    },
+    "test": {
+        "content": "<h1>Nouveau Mod\u00e8le</h1>\n<p>Tapez votre message ici.</p>",
+        "variables": [
+            "variable"
+        ]
+    }
+}

@@ -12,14 +12,14 @@ class HistoryManager:
             with open(self.filepath, 'w') as f:
                 json.dump([], f)
 
-    def add_entry(self, email, variable, uuid_str, status="Sent"):
+    def add_entry(self, email, variable, subject, uuid_str, status="Sent"):
         entry = {
             "date": datetime.now().isoformat(),
             "email": email,
             "variable": variable,
+            "subject": subject,
             "uuid": uuid_str,
             "status": status,
-            "read": False,
             "replied": False
         }
         
@@ -42,21 +42,19 @@ class HistoryManager:
                 history = json.load(f)
             # Migration/Normalization for old entries
             for entry in history:
-                if "read" not in entry: entry["read"] = False
                 if "replied" not in entry: entry["replied"] = False
+                if "subject" not in entry: entry["subject"] = ""
             return history
         except json.JSONDecodeError:
             return []
 
-    def update_status(self, uuid_str, replied=None, read=None):
+    def update_status(self, uuid_str, replied=None):
         history = self.get_history()
         updated = False
         for entry in history:
             if entry.get("uuid") == uuid_str:
                 if replied is not None:
                     entry["replied"] = replied
-                if read is not None:
-                    entry["read"] = read
                 updated = True
                 break
         

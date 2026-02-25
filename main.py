@@ -3,12 +3,13 @@ import os
 import uuid
 import threading
 import socket
+import re
 from datetime import datetime
 from mail_handler import MailSender
 from history_manager import HistoryManager
 from reply_checker import ReplyChecker
-from tracking_server import run_server
-
+from profile_manager import ProfileManager
+from template_manager import TemplateManager
 # Configuration
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -20,12 +21,8 @@ class App(ctk.CTk):
         # Setup Managers
         self.mail_sender = MailSender()
         self.history_manager = HistoryManager()
-        self.template_path = os.path.join(os.path.dirname(__file__), "templates", "email_template.html")
-
-        # Tracking Server State
-        self.server_thread = None
-        self.server_running = False
-        self.local_ip = self.get_local_ip()
+        self.profile_manager = ProfileManager()
+        self.template_manager = TemplateManager()
 
         # Window Setup
         self.title("Mac Mass Mailer - Advanced")
@@ -36,37 +33,27 @@ class App(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # Tab View
-        self.tab_view = ctk.CTkTabview(self)
+        self.tab_view = ctk.CTkTabview(self, command=self.on_tab_change)
         self.tab_view.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
         
         self.tab_send = self.tab_view.add("Envoi")
+        self.tab_model = self.tab_view.add("Modèle")
         self.tab_settings = self.tab_view.add("Paramètres IMAP")
         self.tab_history = self.tab_view.add("Historique & Suivi")
 
         # --- TAB 1: ENVOI ---
         self.setup_send_tab()
 
-        # --- TAB 2: SETTINGS (IMAP) ---
+        # --- TAB 2: MODELE ---
+        self.setup_model_tab()
+
+        # --- TAB 3: SETTINGS (IMAP) ---
         self.setup_settings_tab()
 
-        # --- TAB 3: HISTORY ---
+        # --- TAB 4: HISTORY ---
         self.setup_history_tab()
         
-        # --- SERVER CONTROLS (IN SETTINGS) ---
-        self.setup_server_controls()
-
         self.log("Application prête.")
-
-    def get_local_ip(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except:
-            return "127.0.0.1"
-
     def setup_send_tab(self):
         self.tab_send.grid_columnconfigure(1, weight=1)
         
@@ -79,29 +66,48 @@ class App(ctk.CTk):
         self.entry_email = ctk.CTkEntry(self.tab_send, placeholder_text="exemple@domaine.com")
         self.entry_email.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
 
-        ctk.CTkLabel(self.tab_send, text="Variable (Prénom):").grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        self.entry_var = ctk.CTkEntry(self.tab_send, placeholder_text="Jean")
-        self.entry_var.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+        ctk.CTkLabel(self.tab_send, text="Modèle à utiliser:").grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        self.combo_send_template = ctk.CTkComboBox(self.tab_send, values=self.template_manager.get_template_names(), state="readonly", command=self.on_send_template_change)
+        self.combo_send_template.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+        templates = self.template_manager.get_template_names()
+        if templates:
+            self.combo_send_template.set(templates[0])
 
-        ctk.CTkLabel(self.tab_send, text="Sujet:").grid(row=3, column=0, padx=10, pady=10, sticky="w")
+        # Dynamic Variables Frame
+        self.frame_variables = ctk.CTkFrame(self.tab_send, fg_color="transparent")
+        self.frame_variables.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.variable_entries = {}
+        self.update_send_variables_ui()
+        
+        ctk.CTkLabel(self.tab_send, text="Sujet:").grid(row=4, column=0, padx=10, pady=10, sticky="w")
         self.entry_subject = ctk.CTkEntry(self.tab_send, placeholder_text="Sujet de l'email")
         self.entry_subject.insert(0, "Votre invitation")
-        self.entry_subject.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+        self.entry_subject.grid(row=4, column=1, padx=10, pady=10, sticky="ew")
 
         self.checkbox_send = ctk.CTkCheckBox(self.tab_send, text="Confirmer l'envoi (Action irréversible)")
-        self.checkbox_send.grid(row=4, column=0, columnspan=2, padx=20, pady=10)
+        self.checkbox_send.grid(row=5, column=0, columnspan=2, padx=20, pady=10)
 
         self.btn_send = ctk.CTkButton(self.tab_send, text="Générer & Envoyer", command=self.process_mail)
-        self.btn_send.grid(row=5, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
+        self.btn_send.grid(row=6, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
 
         # Logs Area
         self.textbox_log = ctk.CTkTextbox(self.tab_send, height=150)
-        self.textbox_log.grid(row=6, column=0, columnspan=2, padx=20, pady=(10, 0), sticky="nsew")
+        self.textbox_log.grid(row=7, column=0, columnspan=2, padx=20, pady=(10, 0), sticky="nsew")
 
     def setup_settings_tab(self):
         self.tab_settings.grid_columnconfigure(1, weight=1)
         
-        ctk.CTkLabel(self.tab_settings, text="Configuration Email (SMTP pour envoi, IMAP pour lecture)", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, columnspan=2, padx=10, pady=20)
+        # Profile Selector
+        ctk.CTkLabel(self.tab_settings, text="Profil Enregistré:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        self.combo_profiles = ctk.CTkComboBox(self.tab_settings, values=self.profile_manager.get_profile_names(), command=self.load_profile, state="readonly")
+        self.combo_profiles.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+        
+        # Let's try to load the first profile if available
+        profiles = self.profile_manager.get_profile_names()
+        if profiles:
+            self.combo_profiles.set(profiles[0])
+            # Delay load to allow UI setup to finish but we need entries first.
+            # We will call self.load_profile manually right after creating entries.
 
         # SMTP Settings
         ctk.CTkLabel(self.tab_settings, text="Serveur SMTP (Envoi):").grid(row=1, column=0, padx=10, pady=5, sticky="w")
@@ -127,52 +133,291 @@ class App(ctk.CTk):
         self.entry_pass = ctk.CTkEntry(self.tab_settings, show="*")
         self.entry_pass.grid(row=5, column=1, padx=10, pady=5, sticky="ew")
         
-        self.btn_save_settings = ctk.CTkButton(self.tab_settings, text="Sauvegarder (Simulation)", command=self.save_settings)
-        self.btn_save_settings.grid(row=6, column=0, columnspan=2, padx=20, pady=20)
+        # Save Profile Section
+        frame_save = ctk.CTkFrame(self.tab_settings, fg_color="transparent")
+        frame_save.grid(row=6, column=0, columnspan=2, pady=20, sticky="ew")
+        frame_save.grid_columnconfigure(1, weight=1)
         
-    def setup_server_controls(self):
-        # Extend Settings Tab
-        frame_server = ctk.CTkFrame(self.tab_settings)
-        frame_server.grid(row=7, column=0, columnspan=2, padx=10, pady=20, sticky="ew")
+        ctk.CTkLabel(frame_save, text="Nom d'enregistrement:").grid(row=0, column=0, padx=10, pady=5)
+        self.entry_profile_name = ctk.CTkEntry(frame_save, placeholder_text="Ex: Gmail Pro")
+        self.entry_profile_name.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
         
-        ctk.CTkLabel(frame_server, text="Serveur de Tracking (Local)", font=ctk.CTkFont(weight="bold")).pack(pady=10)
-        
-        self.label_ip = ctk.CTkLabel(frame_server, text=f"IP Locale détectée: {self.local_ip}")
-        self.label_ip.pack(pady=5)
-        
-        self.btn_server = ctk.CTkButton(frame_server, text="Démarrer le Serveur", command=self.toggle_server, fg_color="green")
-        self.btn_server.pack(pady=10)
-        
-        ctk.CTkLabel(frame_server, text="Note: Le serveur doit être allumé pour que le lien 'Lu' fonctionne.\nLe destinataire doit être sur le même réseau (ou utilisez ngrok).", font=ctk.CTkFont(size=10)).pack(pady=5)
+        self.btn_save_settings = ctk.CTkButton(frame_save, text="💾 Enregistrer Profil", command=self.save_settings)
+        self.btn_save_settings.grid(row=0, column=2, padx=10, pady=5)
 
-    def toggle_server(self):
-        if not self.server_running:
-            # Start
-            self.server_thread = threading.Thread(target=run_server, kwargs={'port': 5000}, daemon=True)
-            self.server_thread.start()
-            self.server_running = True
-            self.btn_server.configure(text="Serveur Actif (Port 5000)", fg_color="red", state="disabled") # Simple implementation: cannot easily stop flask thread without complexity
-            self.log(f"Serveur de tracking démarré sur http://{self.local_ip}:5000")
-        else:
-            self.log("Le serveur est déjà en cours d'exécution.")
+        # Initial Load if profiles exist
+        if profiles:
+            self.load_profile(profiles[0])
         
     def setup_history_tab(self):
         self.tab_history.grid_columnconfigure(0, weight=1)
-        self.tab_history.grid_rowconfigure(1, weight=1)
+        self.tab_history.grid_rowconfigure(2, weight=1)
 
         frame_ctrl = ctk.CTkFrame(self.tab_history)
         frame_ctrl.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         
-        self.btn_refresh = ctk.CTkButton(frame_ctrl, text="🔍 Vérifier Réponses (IMAP)", command=self.check_replies_thread)
+        self.btn_refresh = ctk.CTkButton(frame_ctrl, text="� Actualiser & Vérifier Réponses (IMAP)", command=self.check_replies_thread)
         self.btn_refresh.pack(side="left", padx=10, pady=10)
-
-        self.btn_reload = ctk.CTkButton(frame_ctrl, text="🔄 Rafraîchir Liste", command=self.load_history_view)
-        self.btn_reload.pack(side="left", padx=10, pady=10)
+        
+        self.entry_search = ctk.CTkEntry(frame_ctrl, placeholder_text="Rechercher un email...", width=200)
+        self.entry_search.pack(side="right", padx=10, pady=10)
+        self.entry_search.bind("<KeyRelease>", self.on_search_change)
+        
+        self.filter_var = ctk.StringVar(value="Tous")
+        self.seg_button = ctk.CTkSegmentedButton(self.tab_history, values=["Tous", "Envoyés", "Échecs", "Brouillons"],
+                                                 variable=self.filter_var, command=self.on_filter_change)
+        self.seg_button.grid(row=1, column=0, padx=10, pady=(0, 10))
         
         # Scrollable Frame for rows
         self.scroll_history = ctk.CTkScrollableFrame(self.tab_history, label_text="Historique d'Envois")
-        self.scroll_history.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+        self.scroll_history.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
         
+        self.load_history_view()
+
+    def setup_model_tab(self):
+        self.tab_model.grid_columnconfigure(0, weight=1)
+        self.tab_model.grid_rowconfigure(3, weight=1)
+
+        # Helper Text
+        helper_text = "Modifiez le code HTML de votre email ci-dessous.\n" \
+                      "Astuce : Utilisez {nom_de_la_variable} (ex: {variable}) pour vos variables."
+        ctk.CTkLabel(self.tab_model, text=helper_text, justify="center", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=20, pady=10)
+
+        # Top controls for Model Management
+        frame_model_ctrl = ctk.CTkFrame(self.tab_model, fg_color="transparent")
+        frame_model_ctrl.grid(row=1, column=0, sticky="ew", padx=20, pady=5)
+        
+        ctk.CTkLabel(frame_model_ctrl, text="Modèle:").pack(side="left", padx=(0, 10))
+        self.combo_edit_template = ctk.CTkComboBox(frame_model_ctrl, values=self.template_manager.get_template_names(), command=self.on_edit_template_change, state="readonly")
+        self.combo_edit_template.pack(side="left")
+        templates = self.template_manager.get_template_names()
+        if templates:
+            self.combo_edit_template.set(templates[0])
+
+        self.btn_new_template = ctk.CTkButton(frame_model_ctrl, text="➕ Nouveau", width=80, command=self.new_template_dialog)
+        self.btn_new_template.pack(side="left", padx=5)
+
+        self.btn_rename_template = ctk.CTkButton(frame_model_ctrl, text="✏️ Renommer", width=80, command=self.rename_template_dialog)
+        self.btn_rename_template.pack(side="left", padx=5)
+
+        self.btn_delete_template = ctk.CTkButton(frame_model_ctrl, text="🗑️ Supprimer", width=80, fg_color="red", hover_color="darkred", command=self.delete_current_template)
+        self.btn_delete_template.pack(side="left", padx=5)
+
+        # Variables Management Frame
+        frame_var_ctrl = ctk.CTkFrame(self.tab_model, fg_color="transparent")
+        frame_var_ctrl.grid(row=2, column=0, sticky="ew", padx=20, pady=5)
+        
+        ctk.CTkLabel(frame_var_ctrl, text="Variables:").pack(side="left", padx=(0, 10))
+        self.combo_edit_variable = ctk.CTkComboBox(frame_var_ctrl, values=[], state="readonly")
+        self.combo_edit_variable.pack(side="left")
+
+        self.btn_add_var = ctk.CTkButton(frame_var_ctrl, text="➕ Ajouter", width=80, command=self.add_variable_dialog)
+        self.btn_add_var.pack(side="left", padx=5)
+
+        self.btn_rename_var = ctk.CTkButton(frame_var_ctrl, text="✏️ Renommer", width=80, command=self.rename_variable_dialog)
+        self.btn_rename_var.pack(side="left", padx=5)
+
+        self.btn_delete_var = ctk.CTkButton(frame_var_ctrl, text="🗑️ Supprimer", width=80, fg_color="red", hover_color="darkred", command=self.delete_current_variable)
+        self.btn_delete_var.pack(side="left", padx=5)
+
+        # Editor Frame
+        frame_editor = ctk.CTkFrame(self.tab_model)
+        frame_editor.grid(row=3, column=0, sticky="nsew", padx=20, pady=10)
+        frame_editor.grid_columnconfigure(0, weight=1)
+        frame_editor.grid_rowconfigure(0, weight=1)
+
+        self.textbox_template = ctk.CTkTextbox(frame_editor, font=ctk.CTkFont(family="Consolas", size=12))
+        self.textbox_template.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        
+        # Load Content Button
+        frame_buttons = ctk.CTkFrame(self.tab_model, fg_color="transparent")
+        frame_buttons.grid(row=4, column=0, pady=10)
+        
+        self.btn_load_template = ctk.CTkButton(frame_buttons, text="🔄 Recharger le modèle actuel", command=self.reload_template_to_editor)
+        self.btn_load_template.pack(side="left", padx=10)
+
+        self.btn_save_template = ctk.CTkButton(frame_buttons, text="💾 Enregistrer le modèle", command=self.save_template_from_editor, fg_color="green", hover_color="darkgreen")
+        self.btn_save_template.pack(side="left", padx=10)
+
+        # Load initial
+        self.reload_template_to_editor()
+        self.update_edit_variables_combo()
+
+    def update_template_combos(self):
+        names = self.template_manager.get_template_names()
+        self.combo_edit_template.configure(values=names)
+        self.combo_send_template.configure(values=names)
+        
+        if names and self.combo_edit_template.get() not in names:
+            self.combo_edit_template.set(names[0])
+            self.combo_send_template.set(names[0])
+        self.update_edit_variables_combo()
+        self.update_send_variables_ui()
+
+    def new_template_dialog(self):
+        dialog = ctk.CTkInputDialog(text="Nom du nouveau modèle:", title="Nouveau Modèle")
+        name = dialog.get_input()
+        if name:
+            if name in self.template_manager.get_template_names():
+                self.log(f"Erreur: Le modèle '{name}' existe déjà.")
+                return
+            self.template_manager.save_template(name, "<h1>Nouveau Modèle</h1>\n<p>Tapez votre message ici.</p>")
+            self.update_template_combos()
+            self.combo_edit_template.set(name)
+            self.on_edit_template_change(name)
+
+    def rename_template_dialog(self):
+        old_name = self.combo_edit_template.get()
+        if not old_name: return
+        dialog = ctk.CTkInputDialog(text=f"Nouveau nom pour '{old_name}':", title="Renommer le modèle")
+        new_name = dialog.get_input()
+        if new_name:
+            if self.template_manager.rename_template(old_name, new_name):
+                self.update_template_combos()
+                self.combo_edit_template.set(new_name)
+                self.combo_send_template.set(new_name)
+                self.log(f"Modèle renommé de '{old_name}' à '{new_name}'.")
+            else:
+                self.log("Erreur: Impossible de renommer le modèle. Peut-être que le nom existe déjà.")
+
+    def delete_current_template(self):
+        name = self.combo_edit_template.get()
+        names = self.template_manager.get_template_names()
+        if not name or len(names) <= 1:
+            self.log("Action refusée: Vous devez conserver au moins un modèle.")
+            return
+        
+        self.template_manager.delete_template(name)
+        self.update_template_combos()
+        remaining = self.template_manager.get_template_names()
+        if remaining:
+            self.combo_edit_template.set(remaining[0])
+            self.combo_send_template.set(remaining[0])
+            self.on_edit_template_change(remaining[0])
+        self.log(f"Modèle '{name}' supprimé.")
+
+    def on_edit_template_change(self, choice):
+        self.reload_template_to_editor()
+        self.update_edit_variables_combo()
+
+    def update_edit_variables_combo(self):
+        name = self.combo_edit_template.get()
+        if not name: return
+        variables = self.template_manager.get_template_variables(name)
+        self.combo_edit_variable.configure(values=variables)
+        if variables:
+            self.combo_edit_variable.set(variables[0])
+        else:
+            self.combo_edit_variable.set("")
+
+    def add_variable_dialog(self):
+        name = self.combo_edit_template.get()
+        if not name: return
+        dialog = ctk.CTkInputDialog(text="Nouvelle variable (ex: nom_entreprise):", title="Ajouter Variable")
+        var_name = dialog.get_input()
+        if var_name:
+            # Simple check to validate variable name (no spaces)
+            var_name = var_name.strip().replace(" ", "_")
+            if self.template_manager.add_variable(name, var_name):
+                self.update_edit_variables_combo()
+                self.update_send_variables_ui()
+            else:
+                self.log(f"La variable '{var_name}' existe déjà ou nom invalide.")
+
+    def rename_variable_dialog(self):
+        name = self.combo_edit_template.get()
+        old_var = self.combo_edit_variable.get()
+        if not name or not old_var: return
+        dialog = ctk.CTkInputDialog(text=f"Nouveau nom pour la variable '{old_var}':", title="Renommer Variable")
+        new_var = dialog.get_input()
+        if new_var:
+            new_var = new_var.strip().replace(" ", "_")
+            if self.template_manager.rename_variable(name, old_var, new_var):
+                self.update_edit_variables_combo()
+                self.combo_edit_variable.set(new_var)
+                self.update_send_variables_ui()
+                self.log(f"Variable '{old_var}' renommée en '{new_var}'. N'oubliez pas de mettre à jour le HTML de votre modèle.")
+            else:
+                self.log("Erreur lors du renommage de la variable.")
+
+    def delete_current_variable(self):
+        name = self.combo_edit_template.get()
+        var_name = self.combo_edit_variable.get()
+        if not name or not var_name: return
+        if self.template_manager.remove_variable(name, var_name):
+            self.update_edit_variables_combo()
+            self.update_send_variables_ui()
+            self.log(f"Variable '{var_name}' supprimée.")
+
+    def reload_template_to_editor(self):
+        name = self.combo_edit_template.get()
+        if not name: return
+        content = self.template_manager.get_template_content(name)
+        
+        self.textbox_template.delete("0.0", "end")
+        if content:
+            self.textbox_template.insert("0.0", content)
+            
+    def save_template_from_editor(self):
+        name = self.combo_edit_template.get()
+        if not name: return
+        content = self.textbox_template.get("0.0", "end").strip()
+        
+        # Validation : Check if HTML {tags} match registered variables
+        registered_vars = self.template_manager.get_template_variables(name)
+        # Find all {tags} inside the HTML content, excluding styling {} blocks by trying to match alphanumeric names only
+        # We can loosely match {word}
+        found_tags = re.findall(r'\{([A-Za-z0-9_]+)\}', content)
+        
+        missing_vars = []
+        for tag in set(found_tags):
+            if tag not in registered_vars:
+                missing_vars.append(tag)
+                
+        if missing_vars:
+            self.log(f"Erreur Enregistrement : Les variables suivantes sont utilisées dans le code HTML mais ne sont pas déclarées dans le menu déroulant : {', '.join(missing_vars)}")
+            return
+            
+        try:
+            self.template_manager.save_template(name, content)
+            self.log(f"Modèle d'email '{name}' enregistré avec succès.")
+            
+            # Show a temporary success message
+            success_label = ctk.CTkLabel(self.tab_model, text="Enregistré !", text_color="green")
+            success_label.grid(row=5, column=0, pady=5)
+            self.tab_model.after(3000, success_label.destroy)
+        except Exception as e:
+            self.log(f"Erreur lors de l'enregistrement du modèle: {e}")
+
+    def on_send_template_change(self, choice):
+        self.update_send_variables_ui()
+
+    def update_send_variables_ui(self):
+        # Clear existing entries
+        for widget in self.frame_variables.winfo_children():
+            widget.destroy()
+        self.variable_entries.clear()
+        
+        template_name = self.combo_send_template.get()
+        if not template_name: return
+        
+        variables = self.template_manager.get_template_variables(template_name)
+        for i, var in enumerate(variables):
+            ctk.CTkLabel(self.frame_variables, text=f"Variable ({var}):").grid(row=i, column=0, padx=10, pady=5, sticky="w")
+            entry = ctk.CTkEntry(self.frame_variables, placeholder_text=f"{var}")
+            entry.grid(row=i, column=1, padx=10, pady=5, sticky="ew")
+            self.variable_entries[var] = entry
+            
+        self.frame_variables.grid_columnconfigure(1, weight=1)
+
+    def on_tab_change(self):
+        if self.tab_view.get() == "Historique & Suivi":
+            self.check_replies_thread()
+
+    def on_search_change(self, event):
+        self.load_history_view()
+
+    def on_filter_change(self, value):
         self.load_history_view()
 
     def log(self, message):
@@ -188,9 +433,17 @@ class App(ctk.CTk):
 
     def process_mail(self):
         email = self.entry_email.get().strip()
-        variable = self.entry_var.get().strip()
         subject = self.entry_subject.get().strip()
         send_immediately = self.checkbox_send.get() == 1
+        
+        # Get variables dictionary
+        variables_data = {}
+        for var_name, entry_widget in self.variable_entries.items():
+            variables_data[var_name] = entry_widget.get().strip()
+
+        # To keep backward compatibility with history (using 'variable' field), we encode the dict
+        # or just fallback to listing the values
+        variables_str = ", ".join([f"{k}:{v}" for k,v in variables_data.items()]) if variables_data else "Aucune"
 
         if not email:
             self.log("Erreur: L'email est requis.")
@@ -200,26 +453,25 @@ class App(ctk.CTk):
 
         tracking_id = str(uuid.uuid4())
         
-        # Use detected local IP for the tracking URL
-        # e.g., http://192.168.1.15:5000/track?id=...
-        tracking_url = f"http://{self.local_ip}:5000/track?id={tracking_id}"
-        tracking_pixel = f'<img src="{tracking_url}" width="1" height="1" style="display:none;">'
-
-        template_content = self.load_template()
-        if not template_content:
-            self.log("Erreur: Template introuvable.")
+        if not send_immediately:
+            self.history_manager.add_entry(email, variables_str, subject, tracking_id, "Brouillon")
+            self.log(f"Brouillon sauvegardé pour {email} (envoi non confirmé).")
+            self.load_history_view()
             return
 
-        final_content = template_content.replace("{variable}", variable)
-        
-        # Append pixel
-        if "</body>" in final_content:
-            final_content = final_content.replace("</body>", f"{tracking_pixel}</body>")
-        else:
-            final_content += tracking_pixel
-            
-        # Also add a visible link for debugging/testing transparency issues
-        # final_content += f'<p style="font-size:10px; color:#ccc;">ID: {tracking_id}</p>'
+        template_name = self.combo_send_template.get()
+        if not template_name:
+            self.log("Erreur: Veuillez sélectionner un modèle.")
+            return
+
+        template_content = self.template_manager.get_template_content(template_name)
+        if not template_content:
+            self.log("Erreur: Modèle introuvable ou vide.")
+            return
+
+        final_content = template_content
+        for var_name, var_value in variables_data.items():
+            final_content = final_content.replace(f"{{{var_name}}}", var_value)
 
         # Validate SMTP settings
         smtp_server = self.entry_smtp_server.get().strip()
@@ -237,17 +489,52 @@ class App(ctk.CTk):
         )
         
         status = "Envoyé" if success else "Échec"
-        self.history_manager.add_entry(email, variable, tracking_id, status)
+        self.history_manager.add_entry(email, variables_str, subject, tracking_id, status)
         
         if success:
-            self.log(f"Succès: Email envoyé à {email}. Pixel: {tracking_url}")
+            self.log(f"Succès: Email envoyé à {email}.")
             self.load_history_view()
         else:
             self.log(f"Erreur SMTP: {msg}")
 
     def save_settings(self):
-        # In a real app we would save to a config file
-        self.log("Paramètres IMAP enregistrés en mémoire (pour cette session).")
+        profile_name = self.entry_profile_name.get().strip()
+        smtp_var = self.entry_smtp_server.get().strip()
+        port_var = self.entry_smtp_port.get().strip()
+        imap_var = self.entry_imap.get().strip()
+        user_var = self.entry_user.get().strip()
+        pass_var = self.entry_pass.get().strip()
+
+        if not profile_name:
+            self.log("Erreur: Donnez un nom pour enregistrer ce profil.")
+            return
+
+        self.profile_manager.save_profile(profile_name, smtp_var, port_var, imap_var, user_var, pass_var)
+        self.combo_profiles.configure(values=self.profile_manager.get_profile_names())
+        self.combo_profiles.set(profile_name)
+        self.log(f"Profil '{profile_name}' enregistré avec succès.")
+
+    def load_profile(self, profile_name):
+        profile = self.profile_manager.get_profile(profile_name)
+        if profile:
+            self.entry_smtp_server.delete(0, 'end')
+            self.entry_smtp_server.insert(0, profile.get("smtp_server", ""))
+            
+            self.entry_smtp_port.delete(0, 'end')
+            self.entry_smtp_port.insert(0, profile.get("smtp_port", "587"))
+            
+            self.entry_imap.delete(0, 'end')
+            self.entry_imap.insert(0, profile.get("imap_server", ""))
+            
+            self.entry_user.delete(0, 'end')
+            self.entry_user.insert(0, profile.get("username", ""))
+            
+            self.entry_pass.delete(0, 'end')
+            self.entry_pass.insert(0, profile.get("password", ""))
+            
+            self.entry_profile_name.delete(0, 'end')
+            self.entry_profile_name.insert(0, profile_name)
+            self.log(f"Profil '{profile_name}' chargé.")
 
     def check_replies_thread(self):
         threading.Thread(target=self.check_replies, daemon=True).start()
@@ -258,7 +545,9 @@ class App(ctk.CTk):
         pwd = self.entry_pass.get()
 
         if not host or not user or not pwd:
-            self.log("Erreur: Veuillez configurer l'IMAP dans l'onglet Paramètres.")
+            self.log("Information: Configurez l'IMAP dans les paramètres pour vérifier les réponses automatiquement.")
+            # We still load the view even if we can't check IMAP
+            self.after(0, self.load_history_view)
             return
 
         self.log("Connexion IMAP en cours pour vérifier les réponses...")
@@ -283,31 +572,51 @@ class App(ctk.CTk):
             widget.destroy()
 
         history = self.history_manager.get_history()
+        search_query = self.entry_search.get().strip().lower()
+        active_filter = self.filter_var.get()
+
+        if search_query:
+            history = [entry for entry in history if search_query in entry.get('email', '').lower()]
+            
+        if active_filter == "Envoyés":
+            history = [e for e in history if e.get("status") in ("Envoyé", "Sent")]
+        elif active_filter == "Échecs":
+            history = [e for e in history if e.get("status") == "Échec"]
+        elif active_filter == "Brouillons":
+            history = [e for e in history if e.get("status") == "Brouillon"]
         
         # Header
-        headers = ["Date", "Email", "Statut", "Lu?", "Répondu?"]
+        headers = ["Date", "Heure", "Email", "Sujet", "Statut", "Répondu?"]
         for i, h in enumerate(headers):
             ctk.CTkLabel(self.scroll_history, text=h, font=ctk.CTkFont(weight="bold")).grid(row=0, column=i, padx=5, pady=5)
 
         # Rows
         for i, entry in enumerate(reversed(history)):
             row = i + 1
-            date_short = entry['date'].split("T")[0]
+            try:
+                date_obj = datetime.fromisoformat(entry['date'])
+                date_short = date_obj.strftime("%Y-%m-%d")
+                time_short = date_obj.strftime("%H:%M:%S")
+            except:
+                date_short = entry['date'].split("T")[0]
+                time_short = "--:--:--"
+
             ctk.CTkLabel(self.scroll_history, text=date_short).grid(row=row, column=0, padx=5, pady=2)
-            ctk.CTkLabel(self.scroll_history, text=entry['email']).grid(row=row, column=1, padx=5, pady=2)
-            ctk.CTkLabel(self.scroll_history, text=entry['status']).grid(row=row, column=2, padx=5, pady=2)
+            ctk.CTkLabel(self.scroll_history, text=time_short).grid(row=row, column=1, padx=5, pady=2)
+            ctk.CTkLabel(self.scroll_history, text=entry['email']).grid(row=row, column=2, padx=5, pady=2)
             
-            # Read Checkbox (Manual toggle for now)
-            # read_var = ctk.BooleanVar(value=entry.get('read', False))
-            is_read = "✅" if entry.get('read') else "❌"
-            ctk.CTkLabel(self.scroll_history, text=is_read).grid(row=row, column=3, padx=5, pady=2)
-            # cb_read = ctk.CTkCheckBox(self.scroll_history, text="", variable=read_var, width=20, 
-            #                           command=lambda u=entry['uuid'], v=read_var: self.history_manager.update_status(u, read=v.get()))
-            # cb_read.grid(row=row, column=3, padx=5, pady=2)
+            subject_text = entry.get('subject', '')
+            if len(subject_text) > 20: subject_text = subject_text[:17] + "..."
+            ctk.CTkLabel(self.scroll_history, text=subject_text).grid(row=row, column=3, padx=5, pady=2)
+            
+            ctk.CTkLabel(self.scroll_history, text=entry['status']).grid(row=row, column=4, padx=5, pady=2)
 
             # Replied Label (Auto detected)
-            is_replied = "✅" if entry.get('replied') else "❌"
-            ctk.CTkLabel(self.scroll_history, text=is_replied).grid(row=row, column=4, padx=5, pady=2)
+            if entry.get('status') in ("Brouillon", "Échec"):
+                is_replied = "-"
+            else:
+                is_replied = "✅" if entry.get('replied') else "❌"
+            ctk.CTkLabel(self.scroll_history, text=is_replied).grid(row=row, column=5, padx=5, pady=2)
 
 if __name__ == "__main__":
     app = App()
