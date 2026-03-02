@@ -69,8 +69,20 @@ class ReplyChecker:
         except Exception as e:
             self.logger.error(f"IMAP Connection Error: {e}")
             return []
+            
+        # Build a global set of existing replies to prevent the same reply
+        # from being attached to multiple history entries for the same recipient.
+        global_existing_replies = set()
+        for e in history_entries:
+            recip = e.get("email")
+            for r in e.get("replies", []):
+                global_existing_replies.add((recip, r.get("date")))
+                
+        # We also need to keep track of replies we just found in this run
+        new_replies_keys = set()
         
-        for entry in history_entries:
+        # Sort or process in reverse so we try connecting the reply to the most recent sent email first
+        for entry in reversed(history_entries):
             # We skip drafts/failures. We don't skip if already replied, 
             # because there might be multiple replies or a newer one, 
             # though for simplicity we only checked unreplied previously.
@@ -101,7 +113,6 @@ class ReplyChecker:
                 
                 # We need to find replies that we haven't already saved.
                 # The history entry might have a list of 'replies'.
-                existing_reply_dates = [r.get("date") for r in entry.get("replies", [])]
                 
                 for msg_id in reversed(msg_ids):
                     res, msg_data = mail.fetch(msg_id, "(RFC822)")
@@ -115,7 +126,9 @@ class ReplyChecker:
                                     msg_date = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple))
                                     msg_date_iso = msg_date.isoformat()
                                     
-                                    if msg_date > sent_date and msg_date_iso not in existing_reply_dates:
+                                    reply_key = (recipient_email, msg_date_iso)
+                                    
+                                    if msg_date > sent_date and reply_key not in global_existing_replies and reply_key not in new_replies_keys:
                                         # Decode Subject
                                         subject = ""
                                         if msg["Subject"]:
@@ -135,6 +148,7 @@ class ReplyChecker:
                                             "content": body
                                         }
                                         replies_found.append(reply_dict)
+                                        new_replies_keys.add(reply_key)
                                         # We append it, but we continue processing other msg_ids to get ALL new replies
             except Exception as e:
                 self.logger.error(f"Error checking {recipient_email}: {e}")
