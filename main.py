@@ -5,12 +5,14 @@ import threading
 import socket
 import re
 import tkinter.messagebox as messagebox
+import webbrowser
 from datetime import datetime
 from mail_handler import MailSender
 from history_manager import HistoryManager
 from reply_checker import ReplyChecker
 from profile_manager import ProfileManager
 from template_manager import TemplateManager
+from scraper import ScraperManager
 # Configuration
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -24,6 +26,7 @@ class App(ctk.CTk):
         self.history_manager = HistoryManager()
         self.profile_manager = ProfileManager()
         self.template_manager = TemplateManager()
+        self.scraper_manager = ScraperManager()
 
         # Pagination State
         self.current_page = 1
@@ -45,6 +48,7 @@ class App(ctk.CTk):
         self.tab_model = self.tab_view.add("Modèle")
         self.tab_settings = self.tab_view.add("Paramètres IMAP")
         self.tab_history = self.tab_view.add("Historique & Suivi")
+        self.tab_scraping = self.tab_view.add("Scraping")
 
         # --- TAB 1: ENVOI ---
         self.setup_send_tab()
@@ -57,6 +61,9 @@ class App(ctk.CTk):
 
         # --- TAB 4: HISTORY ---
         self.setup_history_tab()
+
+        # --- TAB 5: SCRAPING ---
+        self.setup_scraping_tab()
         
         self.log("Application prête.")
 
@@ -162,7 +169,7 @@ class App(ctk.CTk):
         frame_ctrl = ctk.CTkFrame(self.tab_history)
         frame_ctrl.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         
-        self.btn_refresh = ctk.CTkButton(frame_ctrl, text="� Actualiser & Vérifier Réponses (IMAP)", command=self.check_replies_thread)
+        self.btn_refresh = ctk.CTkButton(frame_ctrl, text="🔄 Actualiser & Vérifier Réponses (IMAP)", command=self.check_replies_thread)
         self.btn_refresh.pack(side="left", padx=10, pady=10)
         
         self.btn_clear_all = ctk.CTkButton(frame_ctrl, text="🗑 Vider tout", fg_color="#c0392b", hover_color="#922b21", command=self.confirm_clear_all)
@@ -198,6 +205,78 @@ class App(ctk.CTk):
         self.btn_next_page.pack(side="left", padx=5)
 
         self.load_history_view()
+
+    def setup_scraping_tab(self):
+        self.tab_scraping.grid_columnconfigure(0, weight=1)
+        self.tab_scraping.grid_rowconfigure(1, weight=1)
+        
+        # Top Config Frame
+        frame_config = ctk.CTkFrame(self.tab_scraping)
+        frame_config.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
+        
+        lbl_city = ctk.CTkLabel(frame_config, text="Ville ou Région :")
+        lbl_city.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        self.entry_scraping_city = ctk.CTkEntry(frame_config, placeholder_text="Ex: Paris, Lyon...", width=150)
+        self.entry_scraping_city.grid(row=0, column=1, padx=10, pady=10, sticky="w")
+        
+        lbl_keywords = ctk.CTkLabel(frame_config, text="Mots-clés / Rayon :")
+        lbl_keywords.grid(row=0, column=2, padx=10, pady=10, sticky="w")
+        
+        self.entry_scraping_keywords = ctk.CTkEntry(frame_config, placeholder_text="Ex: recherche groupe bar", width=180)
+        self.entry_scraping_keywords.grid(row=0, column=3, padx=10, pady=10, sticky="w")
+        
+        self.btn_start_scraping = ctk.CTkButton(frame_config, text="🔍 Démarrer Scraping Google", command=self.perform_scraping_thread)
+        self.btn_start_scraping.grid(row=0, column=4, padx=20, pady=10)
+        
+        # Results View
+        self.scroll_scraping_results = ctk.CTkScrollableFrame(self.tab_scraping, label_text="Annonces / Opportunités (Google)")
+        self.scroll_scraping_results.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
+
+    def perform_scraping_thread(self):
+        self.btn_start_scraping.configure(state="disabled", text="Recherche...")
+        threading.Thread(target=self.perform_scraping, daemon=True).start()
+
+    def perform_scraping(self):
+        city = self.entry_scraping_city.get().strip()
+        keywords = self.entry_scraping_keywords.get().strip()
+        
+        if not city and not keywords:
+            self.log("Scraping: Veuillez entrer une ville ou des mots-clés.")
+            self.after(0, lambda: self.btn_start_scraping.configure(state="normal", text="🔍 Démarrer Scraping Google"))
+            return
+            
+        self.log(f"Lancement de la recherche d'opportunités pour : {city} {keywords}")
+        
+        results = self.scraper_manager.search_gigs(city, keywords, num_results=15)
+        
+        self.after(0, lambda: self.display_scraping_results(results))
+        self.after(0, lambda: self.btn_start_scraping.configure(state="normal", text="🔍 Démarrer Scraping Google"))
+        
+    def display_scraping_results(self, results):
+        # Clear previous results
+        for widget in self.scroll_scraping_results.winfo_children():
+            widget.destroy()
+            
+        if not results:
+            lbl = ctk.CTkLabel(self.scroll_scraping_results, text="Aucun résultat trouvé sur Google.", text_color="orange")
+            lbl.pack(pady=20)
+            return
+            
+        for idx, res in enumerate(results):
+            frame_res = ctk.CTkFrame(self.scroll_scraping_results)
+            frame_res.pack(fill="x", padx=10, pady=5)
+            frame_res.grid_columnconfigure(1, weight=1)
+            
+            lbl_title = ctk.CTkLabel(frame_res, text=res['title'], font=ctk.CTkFont(weight="bold", size=14), anchor="w")
+            lbl_title.grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 2), sticky="w")
+            
+            lbl_desc = ctk.CTkLabel(frame_res, text=res['description'], wraplength=450, justify="left", anchor="w")
+            lbl_desc.grid(row=1, column=0, columnspan=2, padx=10, pady=2, sticky="w")
+            
+            btn_open = ctk.CTkButton(frame_res, text="🌐 Ouvrir l'annonce", width=120, 
+                                     command=lambda url=res['url']: webbrowser.open(url))
+            btn_open.grid(row=0, column=2, rowspan=2, padx=10, pady=10, sticky="e")
 
     def prev_page(self):
         if self.current_page > 1:
