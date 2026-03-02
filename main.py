@@ -4,6 +4,7 @@ import uuid
 import threading
 import socket
 import re
+import tkinter.messagebox as messagebox
 from datetime import datetime
 from mail_handler import MailSender
 from history_manager import HistoryManager
@@ -23,6 +24,10 @@ class App(ctk.CTk):
         self.history_manager = HistoryManager()
         self.profile_manager = ProfileManager()
         self.template_manager = TemplateManager()
+
+        # Pagination State
+        self.current_page = 1
+        self.items_per_page = 10
 
         # Window Setup
         self.title("Mac Mass Mailer - Advanced")
@@ -54,6 +59,7 @@ class App(ctk.CTk):
         self.setup_history_tab()
         
         self.log("Application prête.")
+
     def setup_send_tab(self):
         self.tab_send.grid_columnconfigure(1, weight=1)
         
@@ -159,12 +165,18 @@ class App(ctk.CTk):
         self.btn_refresh = ctk.CTkButton(frame_ctrl, text="� Actualiser & Vérifier Réponses (IMAP)", command=self.check_replies_thread)
         self.btn_refresh.pack(side="left", padx=10, pady=10)
         
+        self.btn_clear_all = ctk.CTkButton(frame_ctrl, text="🗑 Vider tout", fg_color="#c0392b", hover_color="#922b21", command=self.confirm_clear_all)
+        self.btn_clear_all.pack(side="left", padx=5)
+
+        self.btn_delete_email = ctk.CTkButton(frame_ctrl, text="🗑 Purger un contact...", fg_color="#d35400", hover_color="#a04000", command=self.confirm_delete_by_email)
+        self.btn_delete_email.pack(side="left", padx=5)
+        
         self.entry_search = ctk.CTkEntry(frame_ctrl, placeholder_text="Rechercher un email...", width=200)
         self.entry_search.pack(side="right", padx=10, pady=10)
         self.entry_search.bind("<KeyRelease>", self.on_search_change)
         
         self.filter_var = ctk.StringVar(value="Tous")
-        self.seg_button = ctk.CTkSegmentedButton(self.tab_history, values=["Tous", "Envoyés", "Échecs", "Brouillons"],
+        self.seg_button = ctk.CTkSegmentedButton(self.tab_history, values=["Tous", "Envoyés", "Échecs", "Brouillons", "Non consultées", "Consultées"],
                                                  variable=self.filter_var, command=self.on_filter_change)
         self.seg_button.grid(row=1, column=0, padx=10, pady=(0, 10))
         
@@ -172,6 +184,29 @@ class App(ctk.CTk):
         self.scroll_history = ctk.CTkScrollableFrame(self.tab_history, label_text="Historique d'Envois")
         self.scroll_history.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
         
+        # Pagination Controls
+        self.frame_pagination = ctk.CTkFrame(self.tab_history, fg_color="transparent")
+        self.frame_pagination.grid(row=3, column=0, pady=5)
+        
+        self.btn_prev_page = ctk.CTkButton(self.frame_pagination, text="<", width=30, command=self.prev_page)
+        self.btn_prev_page.pack(side="left", padx=5)
+        
+        self.lbl_page_info = ctk.CTkLabel(self.frame_pagination, text="Page 1 / 1")
+        self.lbl_page_info.pack(side="left", padx=10)
+        
+        self.btn_next_page = ctk.CTkButton(self.frame_pagination, text=">", width=30, command=self.next_page)
+        self.btn_next_page.pack(side="left", padx=5)
+
+        self.load_history_view()
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_history_view()
+
+    def next_page(self):
+        # Upper bound checks are done in load_history_view
+        self.current_page += 1
         self.load_history_view()
 
     def setup_model_tab(self):
@@ -415,9 +450,11 @@ class App(ctk.CTk):
             self.check_replies_thread()
 
     def on_search_change(self, event):
+        self.current_page = 1
         self.load_history_view()
 
     def on_filter_change(self, value):
+        self.current_page = 1
         self.load_history_view()
 
     def log(self, message):
@@ -453,12 +490,6 @@ class App(ctk.CTk):
 
         tracking_id = str(uuid.uuid4())
         
-        if not send_immediately:
-            self.history_manager.add_entry(email, variables_str, subject, tracking_id, "Brouillon")
-            self.log(f"Brouillon sauvegardé pour {email} (envoi non confirmé).")
-            self.load_history_view()
-            return
-
         template_name = self.combo_send_template.get()
         if not template_name:
             self.log("Erreur: Veuillez sélectionner un modèle.")
@@ -472,6 +503,12 @@ class App(ctk.CTk):
         final_content = template_content
         for var_name, var_value in variables_data.items():
             final_content = final_content.replace(f"{{{var_name}}}", var_value)
+            
+        if not send_immediately:
+            self.history_manager.add_entry(email, variables_str, subject, tracking_id, "Brouillon", final_content)
+            self.log(f"Brouillon sauvegardé pour {email} (envoi non confirmé).")
+            self.load_history_view()
+            return
 
         # Validate SMTP settings
         smtp_server = self.entry_smtp_server.get().strip()
@@ -489,7 +526,7 @@ class App(ctk.CTk):
         )
         
         status = "Envoyé" if success else "Échec"
-        self.history_manager.add_entry(email, variables_str, subject, tracking_id, status)
+        self.history_manager.add_entry(email, variables_str, subject, tracking_id, status, final_content)
         
         if success:
             self.log(f"Succès: Email envoyé à {email}.")
@@ -554,11 +591,11 @@ class App(ctk.CTk):
         checker = ReplyChecker(host, user, pwd)
         history = self.history_manager.get_history()
         
-        replied_uuids = checker.check_replies(history)
+        replies_found = checker.check_replies(history)
         
         count = 0
-        for uid in replied_uuids:
-            if self.history_manager.update_status(uid, replied=True):
+        for reply in replies_found:
+            if self.history_manager.add_reply(reply["uuid"], reply):
                 count += 1
         
         self.log(f"Vérification terminée. {count} nouvelle(s) réponse(s) détectée(s).")
@@ -574,6 +611,11 @@ class App(ctk.CTk):
         history = self.history_manager.get_history()
         search_query = self.entry_search.get().strip().lower()
         active_filter = self.filter_var.get()
+        
+        if active_filter in ("Consultées", "Non consultées"):
+            self.scroll_history.configure(label_text="Historique de Réception")
+        else:
+            self.scroll_history.configure(label_text="Historique d'Envois")
 
         if search_query:
             history = [entry for entry in history if search_query in entry.get('email', '').lower()]
@@ -584,14 +626,97 @@ class App(ctk.CTk):
             history = [e for e in history if e.get("status") == "Échec"]
         elif active_filter == "Brouillons":
             history = [e for e in history if e.get("status") == "Brouillon"]
+            
+        if active_filter in ("Non consultées", "Consultées"):
+            # Extract all replies flat list
+            replies_list = []
+            for entry in self.history_manager.get_history():
+                for r in entry.get("replies", []):
+                    # Attach parent uuid to the reply dictionary so we can trace back deletions
+                    r["_parent_uuid"] = entry.get("uuid")
+                    if active_filter == "Consultées" and r.get("read"):
+                        replies_list.append(r)
+                    elif active_filter == "Non consultées" and not r.get("read"):
+                        replies_list.append(r)
+            
+            if search_query:
+                replies_list = [r for r in replies_list if search_query in r.get("email", "").lower() or search_query in r.get("subject", "").lower()]
+
+            # Sort replies by date newest first
+            replies_list.sort(key=lambda x: x.get("date", ""), reverse=True)
+            
+            # Pagination
+            total_items = len(replies_list)
+            total_pages = max(1, (total_items + self.items_per_page - 1) // self.items_per_page)
+            if self.current_page > total_pages: self.current_page = total_pages
+            
+            start_idx = (self.current_page - 1) * self.items_per_page
+            end_idx = start_idx + self.items_per_page
+            
+            paged_replies = replies_list[start_idx:end_idx]
+            
+            self.lbl_page_info.configure(text=f"Page {self.current_page} / {total_pages}")
+            
+            headers = ["Date", "Heure", "Expéditeur", "Sujet", "Statut", "Contenu", "Actions"]
+            for i, h in enumerate(headers):
+                ctk.CTkLabel(self.scroll_history, text=h, font=ctk.CTkFont(weight="bold")).grid(row=0, column=i, padx=5, pady=5)
+            
+            for i, reply in enumerate(paged_replies):
+                row = i + 1
+                try:
+                    date_obj = datetime.fromisoformat(reply['date'])
+                    date_short = date_obj.strftime("%Y-%m-%d")
+                    time_short = date_obj.strftime("%H:%M:%S")
+                except:
+                    date_short = reply.get('date', '').split("T")[0] if reply.get('date') else ""
+                    time_short = "--:--:--"
+
+                ctk.CTkLabel(self.scroll_history, text=date_short).grid(row=row, column=0, padx=5, pady=2)
+                ctk.CTkLabel(self.scroll_history, text=time_short).grid(row=row, column=1, padx=5, pady=2)
+                ctk.CTkLabel(self.scroll_history, text=reply.get('email', '')).grid(row=row, column=2, padx=5, pady=2)
+                
+                subject_text = reply.get('subject', '')
+                if len(subject_text) > 40: subject_text = subject_text[:37] + "..."
+                ctk.CTkLabel(self.scroll_history, text=subject_text).grid(row=row, column=3, padx=5, pady=2)
+                
+                status_icon = "✅" if reply.get("read") else "❌"
+                ctk.CTkLabel(self.scroll_history, text=status_icon).grid(row=row, column=4, padx=5, pady=2)
+                
+                content_str = reply.get('content', 'Contenu non disponible')
+                parent_u = reply.get('_parent_uuid')
+                reply_date = reply.get('date')
+                btn_view = ctk.CTkButton(self.scroll_history, text="Consulter", width=60, 
+                                         command=lambda u=parent_u, d=reply_date, c=content_str: self.open_reply(u, d, c))
+                btn_view.grid(row=row, column=5, padx=5, pady=2)
+                
+                # Delete Parent Entry Button
+                btn_del = ctk.CTkButton(self.scroll_history, text="🗑", width=30, fg_color="#c0392b", hover_color="#922b21",
+                                        command=lambda u=parent_u: self.confirm_delete_entry(u))
+                btn_del.grid(row=row, column=6, padx=5, pady=2)
+            return
+
+        # Pagination
+        total_items = len(history)
+        total_pages = max(1, (total_items + self.items_per_page - 1) // self.items_per_page)
+        if self.current_page > total_pages: self.current_page = total_pages
         
-        # Header
-        headers = ["Date", "Heure", "Email", "Sujet", "Statut", "Répondu?"]
+        start_idx = (self.current_page - 1) * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        
+        # history is already reversed in logic, but wait, the original code used reversed(history).
+        # We need to reverse it and then slice.
+        history_reversed = list(reversed(history))
+        paged_history = history_reversed[start_idx:end_idx]
+        
+        self.lbl_page_info.configure(text=f"Page {self.current_page} / {total_pages}")
+
+        # Header for normal history
+        headers = ["Date", "Heure", "Email", "Sujet", "Statut", "Répondu?", "Contenu", "Actions"]
         for i, h in enumerate(headers):
             ctk.CTkLabel(self.scroll_history, text=h, font=ctk.CTkFont(weight="bold")).grid(row=0, column=i, padx=5, pady=5)
 
-        # Rows
-        for i, entry in enumerate(reversed(history)):
+        # Rows for normal history
+        for i, entry in enumerate(paged_history):
             row = i + 1
             try:
                 date_obj = datetime.fromisoformat(entry['date'])
@@ -617,6 +742,97 @@ class App(ctk.CTk):
             else:
                 is_replied = "✅" if entry.get('replied') else "❌"
             ctk.CTkLabel(self.scroll_history, text=is_replied).grid(row=row, column=5, padx=5, pady=2)
+            
+            # Content Button
+            content_str = entry.get('content', 'Contenu non disponible')
+            btn_view = ctk.CTkButton(self.scroll_history, text="Consulter", width=60, 
+                                     command=lambda c=content_str: self.show_email_content_dialog(c))
+            btn_view.grid(row=row, column=6, padx=5, pady=2)
+            
+            # Delete Button
+            uuid_str = entry.get('uuid')
+            btn_del = ctk.CTkButton(self.scroll_history, text="🗑", width=30, fg_color="#c0392b", hover_color="#922b21",
+                                    command=lambda u=uuid_str: self.confirm_delete_entry(u))
+            btn_del.grid(row=row, column=7, padx=5, pady=2)
+
+    def confirm_clear_all(self):
+        active_filter = self.filter_var.get()
+        if active_filter == "Tous":
+            msg = "Êtes-vous sûr de vouloir supprimer TOUT l'historique ?\nCette action est irréversible et supprimera tous les logs d'envoi et réponses sauvegardées."
+        else:
+            msg = f"Êtes-vous sûr de vouloir vider l'onglet '{active_filter}' ?\nCette action est irréversible."
+            
+        if messagebox.askyesno(f"Vider {active_filter}", msg):
+            if self.history_manager.clear_by_filter(active_filter):
+                self.log(f"Historique vidé pour l'onglet : {active_filter}.")
+                self.load_history_view()
+            else:
+                self.log(f"Aucun élément à supprimer dans l'onglet : {active_filter}.")
+
+    def confirm_delete_by_email(self):
+        dialog = ctk.CTkInputDialog(text="Entrez l'adresse email exacte à purger de l'historique :", title="Purger un contact")
+        email_target = dialog.get_input()
+        if email_target:
+            email_target = email_target.strip()
+            if messagebox.askyesno("Confirmation de suppression", f"Voulez-vous vraiment supprimer TOUS les emails envoyés à et reçus de '{email_target}' ?"):
+                if self.history_manager.delete_by_email(email_target):
+                    self.log(f"Historique purgé pour le contact : {email_target}.")
+                    self.load_history_view()
+                else:
+                    self.log(f"Aucun historique trouvé pour : {email_target}.")
+
+    def confirm_delete_entry(self, uuid_str):
+        if messagebox.askyesno("Supprimer l'email", "Êtes-vous sûr de vouloir supprimer cet email de l'historique ?"):
+            if self.history_manager.delete_entry(uuid_str):
+                self.log("Entrée d'historique supprimée.")
+                self.load_history_view()
+
+    def clean_html_for_display(self, text):
+        import re
+        import html
+        
+        # If it doesn't look like HTML, return as is
+        if "<" not in text or ">" not in text:
+            return text
+            
+        # Basic HTML to text conversion for readability
+        cleaned = html.unescape(text)
+        # Replace common block tags with newlines
+        cleaned = re.sub(r'<(br|p|div|h[1-6]|tr|li|blockquote)[^>]*>', '\n', cleaned, flags=re.IGNORECASE)
+        # Remove <style> and <script> blocks completely
+        cleaned = re.sub(r'<(script|style|head)[^>]*>.*?</\1>', '', cleaned, flags=re.IGNORECASE | re.DOTALL)
+        # Remove all remaining HTML tags
+        cleaned = re.sub(r'<[^>]+>', '', cleaned)
+        # Remove extra blank lines and spaces
+        cleaned = re.sub(r'\n\s*\n', '\n\n', cleaned)
+        return cleaned.strip()
+
+    def open_reply(self, parent_uuid, reply_date, content):
+        self.history_manager.mark_reply_read(parent_uuid, reply_date)
+        self.show_email_content_dialog(content)
+        self.load_history_view()
+
+    def show_email_content_dialog(self, content):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Contenu de l'email")
+        dialog.geometry("600x500")
+        dialog.grid_rowconfigure(0, weight=1)
+        dialog.grid_columnconfigure(0, weight=1)
+        
+        # Center in main window
+        dialog.transient(self)
+        dialog.focus()
+        
+        # Clean HTML if any (for old entries or messy replies)
+        clean_content = self.clean_html_for_display(content)
+        
+        textbox = ctk.CTkTextbox(dialog, font=ctk.CTkFont(family="Consolas", size=12))
+        textbox.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        textbox.insert("0.0", clean_content)
+        textbox.configure(state="disabled") # Readonly
+        
+        btn_close = ctk.CTkButton(dialog, text="Fermer", command=dialog.destroy)
+        btn_close.grid(row=1, column=0, pady=10)
 
 if __name__ == "__main__":
     app = App()
