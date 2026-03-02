@@ -809,10 +809,19 @@ class App(ctk.CTk):
 
     def open_reply(self, parent_uuid, reply_date, content):
         self.history_manager.mark_reply_read(parent_uuid, reply_date)
-        self.show_email_content_dialog(content)
+        
+        # Trouver l'email d'origine pour obtenir le destinataire et le sujet
+        history = self.history_manager.get_history()
+        parent_entry = None
+        for entry in history:
+            if entry.get("uuid") == parent_uuid:
+                parent_entry = entry
+                break
+                
+        self.show_email_content_dialog(content, history_entry=parent_entry)
         self.load_history_view()
 
-    def show_email_content_dialog(self, content):
+    def show_email_content_dialog(self, content, history_entry=None):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Contenu de l'email")
         dialog.geometry("600x500")
@@ -831,8 +840,91 @@ class App(ctk.CTk):
         textbox.insert("0.0", clean_content)
         textbox.configure(state="disabled") # Readonly
         
-        btn_close = ctk.CTkButton(dialog, text="Fermer", command=dialog.destroy)
-        btn_close.grid(row=1, column=0, pady=10)
+        # Bottom frame for buttons
+        frame_buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        frame_buttons.grid(row=1, column=0, pady=10, sticky="ew")
+        frame_buttons.grid_columnconfigure(0, weight=1)
+        frame_buttons.grid_columnconfigure(1, weight=1)
+        
+        btn_close = ctk.CTkButton(frame_buttons, text="Fermer", command=dialog.destroy)
+        btn_close.grid(row=0, column=0, padx=10, pady=0)
+        
+        if history_entry:
+            btn_reply = ctk.CTkButton(frame_buttons, text="Répondre", command=lambda: self.open_quick_reply_dialog(history_entry, dialog))
+            btn_reply.grid(row=0, column=1, padx=10, pady=0)
+
+    def open_quick_reply_dialog(self, history_entry, parent_dialog):
+        reply_dialog = ctk.CTkToplevel(self)
+        reply_dialog.title(f"Répondre à {history_entry.get('email', '')}")
+        reply_dialog.geometry("500x400")
+        reply_dialog.grid_rowconfigure(1, weight=1)
+        reply_dialog.grid_columnconfigure(0, weight=1)
+        
+        reply_dialog.transient(parent_dialog)
+        reply_dialog.focus()
+        
+        # Subject
+        original_subject = history_entry.get('subject', '')
+        reply_subject = f"Re: {original_subject}" if not original_subject.lower().startswith("re:") else original_subject
+        
+        lbl_info = ctk.CTkLabel(reply_dialog, text=f"À: {history_entry.get('email', '')}\nObjet: {reply_subject}", justify="left")
+        lbl_info.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        # Message Body
+        textbox = ctk.CTkTextbox(reply_dialog, font=ctk.CTkFont(family="Consolas", size=12))
+        textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=0)
+        
+        # Bottom Buttons
+        frame_buttons = ctk.CTkFrame(reply_dialog, fg_color="transparent")
+        frame_buttons.grid(row=2, column=0, pady=10)
+        
+        def send_reply():
+            content = textbox.get("0.0", "end").strip()
+            if not content:
+                messagebox.showwarning("Attention", "Le message est vide.", parent=reply_dialog)
+                return
+                
+            # Use current SMTP settings from the app
+            smtp_server = self.entry_smtp_server.get().strip()
+            smtp_port = self.entry_smtp_port.get().strip()
+            user = self.entry_user.get().strip()
+            pwd = self.entry_pass.get().strip()
+            
+            if not all([smtp_server, smtp_port, user, pwd]):
+                messagebox.showerror("Erreur SMTP", "Veuillez configurer vos paramètres SMTP dans l'onglet 'Configuration Email'.", parent=reply_dialog)
+                return
+            
+            # Format HTML content simply with line breaks
+            html_content = content.replace('\\n', '<br>')
+            
+            self.log(f"Envoi de la réponse à {history_entry.get('email')}...")
+            btn_send.configure(state="disabled", text="Envoi...")
+            self.update()
+            
+            success, msg = self.mail_sender.send_email(
+                smtp_server, smtp_port, user, pwd,
+                history_entry.get('email'), reply_subject, html_content
+            )
+            
+            if success:
+                self.log(f"Succès: Réponse envoyée à {history_entry.get('email')}.")
+                # Also log it in history as a new sent email for tracking
+                tracking_id = str(uuid.uuid4())
+                self.history_manager.add_entry(history_entry.get('email'), "Réponse directe", reply_subject, tracking_id, "Envoyé", html_content)
+                self.load_history_view()
+                messagebox.showinfo("Succès", "Réponse envoyée avec succès.", parent=reply_dialog)
+                reply_dialog.destroy()
+                parent_dialog.destroy()
+            else:
+                self.log(f"Erreur SMTP lors de la réponse: {msg}")
+                messagebox.showerror("Erreur", f"L'envoi a échoué :\n{msg}", parent=reply_dialog)
+                btn_send.configure(state="normal", text="Envoyer")
+                
+        btn_send = ctk.CTkButton(frame_buttons, text="Envoyer", command=send_reply)
+        btn_send.grid(row=0, column=0, padx=5)
+        
+        btn_cancel = ctk.CTkButton(frame_buttons, text="Annuler", command=reply_dialog.destroy, fg_color="gray")
+        btn_cancel.grid(row=0, column=1, padx=5)
 
 if __name__ == "__main__":
     app = App()
