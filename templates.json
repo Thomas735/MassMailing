@@ -10,5 +10,11 @@
         "variables": [
             "variable"
         ]
+    },
+    "test2": {
+        "content": "yolo",
+        "variables": [
+            "variable"
+        ]
     }
 }

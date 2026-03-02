@@ -214,8 +214,8 @@ class App(ctk.CTk):
         self.tab_model.grid_rowconfigure(3, weight=1)
 
         # Helper Text
-        helper_text = "Modifiez le code HTML de votre email ci-dessous.\n" \
-                      "Astuce : Utilisez {nom_de_la_variable} (ex: {variable}) pour vos variables."
+        helper_text = "Ecrire le mail en html en bas.\n" \
+                      "Utilise {nom_de_la_variable} pour mettre les variables dans le code html."
         ctk.CTkLabel(self.tab_model, text=helper_text, justify="center", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=20, pady=10)
 
         # Top controls for Model Management
